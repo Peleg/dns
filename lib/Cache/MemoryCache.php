@@ -11,7 +11,7 @@ class MemoryCache implements Cache {
      *
      * @var array
      */
-    private $recordsByTypeAndName = [];
+    static private $recordsByTypeAndName = [];
 
     /**
      * Attempt to retrieve a value from the cache
@@ -21,15 +21,15 @@ class MemoryCache implements Cache {
      * @param callable $callback
      */
     public function get($name, $type, callable $callback) {
-        if (isset($this->recordsByTypeAndName[$type][$name])) {
-            list($value, $expireTime) = $this->recordsByTypeAndName[$type][$name];
+        if (isset(static::$recordsByTypeAndName[$type][$name])) {
+            list($value, $expireTime) = static::$recordsByTypeAndName[$type][$name];
 
             if ($expireTime > time()) {
                 $callback(true, $value);
                 return;
             }
 
-            unset($this->recordsByTypeAndName[$type][$name]);
+            unset(static::$recordsByTypeAndName[$type][$name]);
         }
 
         $callback(false, null);
@@ -52,7 +52,7 @@ class MemoryCache implements Cache {
             $ttl = self::DEFAULT_TTL;
         }
 
-        $this->recordsByTypeAndName[$type][$name] = [$addr, time() + $ttl];
+        static::$recordsByTypeAndName[$type][$name] = [$addr, time() + $ttl];
     }
 
     /**
@@ -63,12 +63,12 @@ class MemoryCache implements Cache {
      */
     public function delete($name, $type = null) {
         if ($type !== null) {
-            unset($this->recordsByTypeAndName[$type][$name]);
+            unset(static::$recordsByTypeAndName[$type][$name]);
         } else {
             /* this approach is to avoid COW of the whole record store
                do not "optimise" it! */
-            foreach (array_keys($this->recordsByTypeAndName) as $type) {
-                unset($this->recordsByTypeAndName[$type][$name]);
+            foreach (array_keys(static::$recordsByTypeAndName) as $type) {
+                unset(static::$recordsByTypeAndName[$type][$name]);
             }
         }
     }
@@ -82,7 +82,7 @@ class MemoryCache implements Cache {
         $now = time();
         $toDelete = [];
 
-        foreach ($this->recordsByTypeAndName as $type => $records) {
+        foreach (static::$recordsByTypeAndName as $type => $records) {
             foreach ($records as $name => $record) {
                 if ($record[1] <= $now) {
                     $toDelete[] = [$type, $name];
@@ -91,7 +91,7 @@ class MemoryCache implements Cache {
         }
 
         foreach ($toDelete as $record) {
-            unset($this->recordsByTypeAndName[$record[0]][$record[1]]);
+            unset(static::$recordsByTypeAndName[$record[0]][$record[1]]);
         }
     }
 }
