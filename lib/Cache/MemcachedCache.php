@@ -31,18 +31,12 @@ class MemcachedCache extends KeyValueCache {
      */
     public function get($name, $type, callable $callback)
     {
-        $wasHit = true;
-        $value = $this->memcached->get($this->generateKey($name, $type), function() use(&$wasHit) {
-            $wasHit = false;
-            return false;
-        });
+        $value = $this->memcached->get($this->generateKey($name, $type));
 
-        if ($wasHit) {
+        if ($value)
             $callback(true, $value);
-            return;
-        }
-
-        $callback(false, null);
+        else
+            $callback(false, null);
     }
 
     /**
