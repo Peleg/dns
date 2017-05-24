@@ -2,6 +2,7 @@
 
 namespace Amp\Dns;
 
+use Memcached;
 use Amp\Cache\ArrayCache;
 use Amp\CombinatorException;
 use Amp\CoroutineResult;
@@ -37,7 +38,9 @@ class DefaultResolver implements Resolver {
         $this->questionFactory = new QuestionFactory;
         $this->encoder = (new EncoderFactory)->create();
         $this->decoder = (new DecoderFactory)->create();
-        $this->arrayCache = new ArrayCache;
+
+        $this->arrayCache = $this->initializeCache();
+
         $this->requestIdCounter = 1;
         $this->pendingRequests = [];
         $this->serverIdMap = [];
@@ -58,6 +61,40 @@ class DefaultResolver implements Resolver {
             "enable" => true,
             "keep_alive" => false,
         ]);
+    }
+
+    private function initializeCache() {
+        $arrayCache = new ArrayCache;
+
+        if (!class_exists('Memcached')) {
+            return $arrayCache;
+        }
+
+        $memcached = new Memcached;
+        $memcached->addServer(
+            getenv('DNS_MEMCACHED_HOST') ?: '127.0.0.1',
+            getenv('DNS_MEMCACHED_PORT') ?: 11211,
+            $weight = 100
+        );
+
+        $host = parse_url(getenv('CORE_HOST'), PHP_URL_HOST);
+
+        // load memcached dump into in-memory cache so it can persist beyond one
+        // client request
+        $allCachedValues = $memcached->getMulti([
+            $host . '#' . Record::A,
+            $host . '#' . Record::AAAA,
+            $host . '#' . Record::CNAME,
+            $host . '#' . Record::DNAME
+        ]);
+
+        foreach($allCachedValues as $key => &$value) {
+            // set ttl to 1min, tho we dont care since it wont live past the
+            // lifetime of this request
+            $arrayCache->set($key, $value, 60);
+        }
+
+        return $arrayCache;
     }
 
     /**
@@ -634,7 +671,8 @@ REGEX;
 
         $answers = $response->getAnswerRecords();
         foreach ($answers as $record) {
-            $result[$record->getType()][] = [(string) $record->getData(), $record->getType(), $record->getTTL()];
+            // cache based on the type requested and not the type returned
+            $result[$type][] = [(string) $record->getData(), $record->getType(), $record->getTTL()];
         }
         if (empty($result)) {
             $this->arrayCache->set("$name#$type", [], 300); // "it MUST NOT cache it for longer than five (5) minutes" per RFC 2308 section 7.1
