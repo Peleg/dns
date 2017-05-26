@@ -23,6 +23,7 @@ class DefaultResolver implements Resolver {
     private $encoder;
     private $decoder;
     private $arrayCache;
+    private $_isCachePopulated = false;
     private $requestIdCounter;
     private $pendingRequests;
     private $serverIdMap;
@@ -58,6 +59,57 @@ class DefaultResolver implements Resolver {
             "enable" => true,
             "keep_alive" => false,
         ]);
+    }
+
+    /**
+     * Allows us to prepopulate the array cache with records from the OS DNS
+     * lookup which would go through nscd and respect the returned ttls
+     */
+    private function getOsDnsEntries($host) {
+        $records = dns_get_record($host);
+        if (count($records) === 1 && $records[0]['type'] === 'CNAME') {
+            // keep resolving if the returned value is just the CNAME w/out additional A records
+            return array_merge($records, $this->getOsDnsEntries($records[0]['target']));
+        }
+        return $records;
+    }
+
+    private function prepopulateCacheWithOsEntries($name, $types) {
+        $records = $this->getOsDnsEntries($name);
+        foreach ($records as $record) {
+            $type = constant("\LibDNS\Records\ResourceQTypes::{$record['type']}");
+            $target = isset($record['target'])
+                ? $record['target']
+                : $record['ip'];
+
+            $value = [$target, $type, $record['ttl']];
+            $results[$type][] = $value;
+        }
+
+        // HACK: set all types requested by amp that we're missing from the os
+        // DNS lookup to the CNAME result. don't know how solid this is, but
+        // for our use case it should be good enough
+        foreach ($types as $type) {
+            if (!array_key_exists($type, $results)) {
+                $results[$type] = $results[Record::CNAME];
+            }
+        }
+
+        $this->setResultsInCache($name, $results);
+
+        $this->_isCachePopulated = true;
+    }
+
+    private function setResultsInCache($name, $result) {
+        foreach ($result as $type => $records) {
+            $minttl = INF;
+            foreach ($records as list( , , $ttl)) {
+                if ($ttl && $minttl > $ttl) {
+                    $minttl = $ttl;
+                }
+            }
+            $this->arrayCache->set("$name#$type", $records, $minttl);
+        }
     }
 
     /**
@@ -139,6 +191,11 @@ REGEX;
         }
 
         $types = array_merge($types, [Record::CNAME, Record::DNAME]);
+
+        if (!$this->_isCachePopulated) {
+            $this->prepopulateCacheWithOsEntries($name, $types);
+        }
+
         $lookupName = $name;
         for ($i = 0; $i < 30; $i++) {
             $result = (yield \Amp\resolve($this->doResolve($lookupName, $types, $options)));
@@ -665,15 +722,7 @@ REGEX;
         if ($error) {
             $promisor->fail($error);
         } else {
-            foreach ($result as $type => $records) {
-                $minttl = INF;
-                foreach ($records as list( , $ttl)) {
-                    if ($ttl && $minttl > $ttl) {
-                        $minttl = $ttl;
-                    }
-                }
-                $this->arrayCache->set("$name#$type", $records, $minttl);
-            }
+            $this->setResultsInCache($name, $result);
             $promisor->succeed($result);
         }
     }
